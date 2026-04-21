@@ -94,7 +94,7 @@ reshape 后，原来同一 Prime Token 的"片段"被切成新的独立 token，
 
 $$Q_h = \text{concat}(\{t_i \, q_{(i,h)}\}_{i=1}^T), \quad K_h, V_h \text{ 同理}$$
 
-$q_{(i,h)}, k_{(i,h)}, v_{(i,h)}$ 是 token × head 专属权重，不跨 token 共享。
+$q_{(i,h)}, k_{(i,h)}, v_{(i,h)}$ 是 token × head 专属权重，不跨 token 共享。(这个比较关键，很有道理)
 
 | | RSA | TMHSA |
 |--|--|--|
@@ -106,10 +106,41 @@ $q_{(i,h)}, k_{(i,h)}, v_{(i,h)}$ 是 token × head 专属权重，不跨 token 
 
 ## Token Boost（token 内增强）
 
-独立处理每个 token，保留并增强其自身语义：
+独立处理每个 token，保留并增强其自身语义，核心目标是提升 **token 异质性**（避免不同 token 的表示趋同 / representation collapse）。
 
-- **TSwiGLU（Tokenwise SwiGLU）**：token 级 FFN，激活函数用 SwiGLU
-- **TSMoE（Tokenwise Sparse MoE）**：token 级稀疏混合专家，扩容时不等比增加推理开销；用 z-loss 防止专家负载不均衡
+### TSwiGLU（Tokenwise SwiGLU）— Zenith
+
+对每个 token 独立做 SwiGLU 非线性变换：
+
+$$\text{TSwiGLU}(X) = \bigl(\text{Swish}(X W_1) \otimes X W_2\bigr) W_3$$
+
+- $W_1, W_2 \in \mathbb{R}^{D \times r}$：将 token 从原维度 $D$ **降维到瓶颈维度** $r$
+- $\otimes$：逐元素乘法（门控机制，决定"哪些信息通过"）
+- $W_3 \in \mathbb{R}^{r \times D}$：**投影回原始维度 $D$**，使输出可与输入做残差连接
+
+**$W_3$ 的作用**：整个模块是降维→门控交互→升维的瓶颈结构，$W_3$ 完成最后一步升维，既保证残差连接的维度一致，也将低维门控后的特征线性组合回完整特征空间。
+
+最终输出：$X_{\text{out}} = \text{Norm}(X + \text{TSwiGLU}(X))$
+
+设计灵感来自 DCN-V2 的乘法交互。
+
+### TSMoE（Tokenwise Sparse MoE）— Zenith++
+
+将 TSwiGLU 升级为稀疏 MoE，包含两类专家：
+
+- **共享专家**：始终激活，处理所有 token
+- **稀疏专家**：通过 token 级门控 $\text{Gate}(t_i) = W_0^i \, t_i$ 选择 Top-K 激活
+
+最终输出 = 共享专家输出之和 + Top-K 稀疏专家输出之和 + 残差连接 + LayerNorm。
+
+每个专家内部均实现 TSwiGLU，用 **z-loss** 防止专家负载不均衡。
+
+**核心优势**：稀疏激活使模型在**不增加推理计算量**的前提下大幅扩展容量。
+
+| 版本 | Token Boost 实现 |
+|------|----------------|
+| Zenith | TSwiGLU（轻量瓶颈 FFN + 门控） |
+| Zenith++ | TSMoE（稀疏专家混合，扩展容量） |
 
 ---
 
