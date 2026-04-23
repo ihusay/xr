@@ -30,7 +30,15 @@ $$\hat{y} = f_1(x_1) + f_2(x_2) + \underbrace{f_{12}(x_1, x_2)}_{\text{协同项
 
 ### Hiformer（2023）
 
-将 Transformer self-attention 引入特征交叉，尝试用注意力机制捕捉任意特征对的协同信息。但 vanilla attention 所有 token 共享同一套 $W_Q/W_K/W_V$，不同语义的异构特征被压入同一表示空间，多层后 token 趋于相似，模型容量无法有效利用。
+将 Transformer self-attention 引入特征交叉，核心贡献是两处异构化改造：
+
+**1. Heterogeneous Attention（HeteroAtt）**：Vanilla attention 所有 token 共享同一套 $W_Q/W_K/W_V$，HeteroAtt 给每个特征 $i$ 分配独立的 $Q_i$、$K_i$、$V_i$，特征对 $(i, j)$ 的 attention score 变为 $e_i Q_i^h (e_j K_j^h)^\top / \sqrt{d_k}$，不同特征在各自专属的语义空间里完成投影。
+
+**2. Hiformer = HeteroAtt + Composite Projection**：在 HeteroAtt 基础上进一步增强 Key 的表达力——Key 不再只是单特征投影，而是把所有特征拼接后整体投影（$\hat{K}^h \in \mathbb{R}^{Ld \times Ld_k}$），让每个 Key 感知全局特征上下文。代价是计算量升到 $O(L^2 d^2)$，需要 low-rank 近似 + 末层 pruning 才能部署。
+
+**3. Per-feature FFN**：每个特征有独立的 $W_1^i / W_2^i$，用 GELU 激活，避免共享 FFN 把不同特征的表征"揉"向同一方向。
+
+局限：多层叠加后 token 相似度仍达 0.5~0.68，representation collapse 问题未从根本上解决。
 
 ### Zenith（2025，ByteDance）
 
