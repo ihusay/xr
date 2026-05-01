@@ -25,6 +25,64 @@ Transformer 有两个形状互为转置的矩阵：
 
 ---
 
+## Add & Norm 的演化
+
+### Post-LN（原版 Transformer，2017）
+
+```
+x + Sublayer(x) → LayerNorm(...)
+```
+
+先残差相加，再归一化。梯度要穿过所有上层的 LN 才能回流底层，训练极不稳定——层数超过 ~24 层几乎无法收敛，需要精心 warm-up 调参。
+
+### Pre-LN（GPT-3、LLaMA 的选择）
+
+```
+x + Sublayer(LayerNorm(x))
+```
+
+把 LN 移到 sublayer **内部**（相加之前）。恒等路径 `x` 不经过任何 LN，梯度可以无阻回流底层，100+ 层也能稳定训练，不依赖 warm-up。代价：最后一个 block 输出未归一化，需在 lm_head 前额外加 Final LN（即 LLaMA 的 `model.norm`）。
+
+### Pre-LN + RMSNorm（LLaMA、Qwen、Mistral 当前标配）
+
+用 RMSNorm 替换 Pre-LN 中的 LayerNorm，省去 re-centering，计算量少约 7–8%，性能持平。
+
+### 支线：DeepNorm（2022，极深模型）
+
+```
+α·x + Sublayer(LayerNorm(x))     α > 1
+```
+
+对残差路径乘以 `α > 1`，同时对 sublayer 参数初始化缩放 `β`。数学上可证明任意深度的 Post-LN 都能稳定训练（1000 层亦可），但超参需按层数公式推导，工程上不如 Pre-LN 简洁。
+
+### 支线：QK-Norm（Gemma2、长上下文模型）
+
+在 Attention 内部对 Q、K 单独做 RMSNorm：
+
+```
+Attention(RMSNorm(Q), RMSNorm(K), V)
+```
+
+GQA 使 head_dim 增大时，QKᵀ 点积方差增大，softmax 易饱和。QK-Norm 从源头压制，比单纯 `1/√d` 缩放更稳定，在长上下文场景尤其有效。
+
+### 演化脉络
+
+```
+Post-LN (2017)        简单直觉，深层不稳定
+    ↓
+Pre-LN (~2020)        恒等路径保梯度，工程可用
+    ↓
+Pre-LN + RMSNorm      去均值项，更快，同质量（当前标配）
+    ↓
++ QK-Norm             精确控制 Attention 内部（长上下文 / 大 head_dim）
+
+DeepNorm（支线）       理论修复 Post-LN，适合极深研究场景
+```
+
+核心方向：把 norm 从"事后补救"移到"事前保护"，再精简计算，最后在 Attention 内部精确控制。
+
+---
+
 ## 标准 Attention vs Flash Attention
 
 先补充一个背景，标准Attention有一个很大的瓶颈，源于 **Softmax 数值稳定保证**：实现中必须减去最大值 `m = max(s)`，保证 `exp(xᵢ - m) ∈ (0,1]` 永不溢出。（减均值无此保证，离群值仍可使 exp 溢出）。

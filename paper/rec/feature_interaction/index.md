@@ -28,6 +28,18 @@ $$\hat{y} = f_1(x_1) + f_2(x_2) + \underbrace{f_{12}(x_1, x_2)}_{\text{协同项
 
 引入显式多项式交叉层，理论上可逼近任意有界阶数的特征交叉，同时保留 MLP 的隐式交叉能力。相比 FM 更灵活，但交叉层的参数矩阵随特征维度平方增长，大规模 scaling 时计算效率受限。
 
+### Wukong（Meta，2024）
+
+将推荐模型的缩放轴从**稀疏扩展**（扩大 Embedding 表）转向**密集扩展**（堆深交叉层），核心论点是：Embedding 表增大不能增强特征交叉能力，且受限于内存带宽，无法利用 GPU 算力提升；真正的瓶颈是交叉层的表达能力。
+
+**1. Factorization Machine Block（FMB）**：每层的核心交叉模块。计算 $XX^\top$ 捕捉所有特征对的两两点积，再经 flatten → LN → MLP → reshape，将 $n$ 个输入 embedding 编码为 $n_F$ 个新 embedding。MLP 的角色是把交叉结果重新编码为新的语义表示，而非仅做特征检测。实际用低秩近似 $X(X^\top Y)$（$Y \in \mathbb{R}^{n \times k}$）将复杂度从 $O(n^2 d)$ 降至 $O(nkd)$。
+
+**2. Linear Compression Block（LCB）**：与 FMB 并行的轻量分支，$W_L X_i$ 线性重组输入 embedding，不引入新的交叉阶数，专门保留低阶信息。作用是保证第 $i$ 层的输出始终覆盖 $1$ 到 $2^i$ 阶，而非只有高阶项——单独去掉 LCB 损失有限，但与残差连接同时去掉时 LogLoss 退化 1.84%。
+
+**3. 层结构与指数阶数增长**：每层并行运行 FMB 和 LCB，拼接后加残差、Post-LN 输出：$X_{i+1} = \text{LN}([\text{FMB}(X_i) \| \text{LCB}(X_i)] + W_{\text{res}} X_i)$。第 $i$ 层可捕捉 $1$ 到 $2^i$ 阶交叉，层数线性增加而交叉阶数指数增长，Post-LN 保证每层输出归一化，FM 点积始终在受控尺度内。
+
+在 146B 样本的内部数据集上建立了推荐领域首个 scaling law：$y = -100 + 99.56x^{0.00071}$，算力每翻 4 倍 LogLoss 改善约 0.1%；DCNv2 等竞品在 30~40 GFLOP 后均饱和或训练崩溃，Wukong 跨两个数量级保持稳定提升。详见 [[2024][Wukong]](<[2024][Wukong] Wukong: Towards a Scaling Law for Large-Scale Recommendation.md>)。
+
 ### Hiformer（2023）
 
 将 Transformer self-attention 引入特征交叉，核心贡献是两处异构化改造：
@@ -52,13 +64,3 @@ $$\hat{y} = f_1(x_1) + f_2(x_2) + \underbrace{f_{12}(x_1, x_2)}_{\text{协同项
 
 最终将 token 相似度从 0.5~0.68 压至 0.06~0.47，实现有效 scaling。详见 [[2026][Bytedance] Zenith](<[2026][Bytedance] Zenith Scaling up Ranking Models for Billion-scale Livestreaming Recommendation.md>)。
 
----
-
-## 相关论文
-
-- **[19] Persia (KDD 2022)**：稀疏 embedding 扩展至 100T 参数
-- **[22] Meta 分布式训练 (2021)**：大规模 embedding table 训练效率
-- **[1] Understanding Scaling Laws for Rec (Meta 2022)**：推荐 scaling 规律
-- **[32] Wukong (2023)**：因子化交叉层 + 推荐 scaling law
-- **[7] Hiformer (2023)**：提出 vanilla attention not expressive enough
-- **Zenith (2025)**：token 异质性原则，TikTok Live 部署
