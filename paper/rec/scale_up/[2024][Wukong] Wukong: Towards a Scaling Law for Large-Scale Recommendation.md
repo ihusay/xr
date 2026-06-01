@@ -77,17 +77,38 @@ $$X_{i+1} = \text{LayerNorm}\bigl([\text{FMB}(X_i) \| \text{LCB}(X_i)] + W_{\tex
 
 FMB 用 FM 捕捉两两特征交叉，再经 MLP 将交叉结果编码为新的 embedding 集合：
 
-$$X \xrightarrow{XX^\top} [n, n] \xrightarrow{\text{flatten}} [n^2] \xrightarrow{\text{LN + MLP}} [n_F \cdot d] \xrightarrow{\text{reshape}} [n_F,\ d]$$
+$$X \xrightarrow{X(X^\top W)} (B, n_{\text{in}}, k) \xrightarrow{\text{flatten}} (B, n_{\text{in}} \cdot k) \xrightarrow{\text{LN + MLP}} (B, n_F \cdot d) \xrightarrow{\text{reshape}} (B, n_F, d)$$
 
-输入 $n$ 个 embedding，输出 $n_F$ 个新 embedding，每层 $n_F$ 固定，MLP 负责把交叉信息压缩重组而非检测交叉。
+输入 $n_{\text{in}}$ 个 embedding，输出 $n_F$ 个新 embedding，每层 $n_F$ 固定，MLP 负责把交叉信息压缩重组而非检测交叉。
 
-**低秩优化**：$XX^\top$ 是 $O(n^2 d)$，实际用 $X(X^\top Y)$（$Y \in \mathbb{R}^{n \times k},\ k \ll n$）等价替代，复杂度降至 $O(nkd)$，$Y$ 为固定可学习参数。
+**低秩优化**：完整 FM 交叉矩阵 $XX^\top \in \mathbb{R}^{n \times n}$ 代价 $O(n^2 d)$，实际用可学习低秩矩阵 $W \in \mathbb{R}^{n_{\text{in}} \times k}$（$k \ll n_{\text{in}}$）近似，计算 $X(X^\top W)$，复杂度降至 $O(n_{\text{in}} \cdot k \cdot d)$。
+
+**einsum 表达**：
+
+```python
+# step1: X^T W -> (B, d, k)
+mid = torch.einsum("bid,ir->bdr", inputs, weight)
+
+# step2: X * mid -> (B, n_in, k)
+outputs = torch.einsum("bid,bdr->bir", inputs, mid)
+
+# flatten -> LayerNorm -> MLP -> reshape -> (B, n_out, d)
+```
 
 #### Linear Compression Block（LCB）
 
 $$\text{LCB}(X_i) = W_l X_i$$
 
 线性变换，在不增加交互阶数的情况下重新组合 Embedding，保留低阶信息，确保交互阶数的单调性。
+
+**核心思路**：输入 $(B, n_{\text{in}}, d)$，用可学习矩阵 $W \in \mathbb{R}^{n_{\text{in}} \times n_{\text{out}}}$ 对 **feature 数量维度**做加权线性组合，输出 $(B, n_{\text{out}}, d)$。压缩发生在 feature 的数量上，而非 embedding 本身的维度 $d$，相当于学习如何将 $n_{\text{in}}$ 个 feature 聚合为 $n_{\text{out}}$ 个新 feature。
+
+**einsum 表达**：
+
+```python
+# inputs: (B, n_in, d),  weight: (n_in, n_out)  ->  outputs: (B, n_out, d)
+outputs = torch.einsum("bid,io->bod", inputs, weight)
+```
 
 #### 缩放策略
 

@@ -50,8 +50,6 @@ conversion 到达  -> 同一样本以 positive 重新送入训练流
 
 代表方法：
 
-- **DEFUSE**
-- **DDFM**
 - **DFSN**
     - 构建两类卫星模型：特征卫星（短窗口，无复制机制，捕捉最新特征分布）和无偏卫星（无窗口，重要性采样校正偏差）
     - Embedding Transfer：将卫星的 embedding 层与主模型 embedding 线性加权融合，刷新主模型的特征表示

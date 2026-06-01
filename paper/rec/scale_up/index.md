@@ -18,6 +18,28 @@ $$\hat{y} = f_1(x_1) + f_2(x_2) + \underbrace{f_{12}(x_1, x_2)}_{\text{协同项
 
 ---
 
+## 核心方案
+
+### Embedding → Token 的构造方法
+
+各方法在 lookup 阶段高度趋同（类别特征查表、dense 经 MLP 聚合成少量向量、lookup 阶段保持简单把交叉留给后续），真正的分歧在于 **embedding 如何组织成 token**，可归为三种范式：
+
+| 处理维度 | 特征级 token | 语义压缩 token | 位置切片 token |
+|---|---|---|---|
+| **代表** | Wukong、Hiformer | Zenith | MixFormer |
+| **一个 token = ?** | 单个 embedding 向量 | 一组语义相近特征压成的高维向量 | 全部 NS 特征 concat 后等长切的一片 |
+| **构造操作** | lookup 直接成 token（multi-hot 先 sum pooling，dense 经 MLP+split） | 分组 concat → per-group MLP 投影；ID 特征单独成 token | 全部 concat → chunk 切 $N$ 片 → 独立 $W_j$ 升维 |
+| **分组依据** | 无（一特征一 token） | 人工语义分组（语义相近放一组） | 位置等分（机械切，无语义） |
+| **token 数** | 与特征数同阶（Wukong $n$；Hiformer $L=\lvert C\rvert+n^D+t$） | $T=32$（从 $K=4552$ 压来） | $N=8\sim16$ 固定超参 |
+| **token 数 vs 特征数** | 同阶，随特征膨胀 | 语义解耦，分组决定（仍可能涨） | 完全固定，与特征数无关 |
+
+**后两种方法的关键对立**（都压缩，分歧只在怎么分组）：
+
+- **语义压缩**认为 token 必须语义纯净——因为它是 self-attention 单元，混入杂特征会引入 attention 噪声 → 人工语义分组
+- **位置切片**认为 token 是 cross-attention 的 query 不是 self-attention 单元，纯净度无所谓，HeadMixing 能补语义模糊，几千特征人工分组是负担 → 位置等分即可
+
+---
+
 ## 演进路线
 
 ### FM（Factorization Machines，2010）
@@ -63,4 +85,18 @@ $$\hat{y} = f_1(x_1) + f_2(x_2) + \underbrace{f_{12}(x_1, x_2)}_{\text{协同项
 **3. Token Boost（token 内增强）**：共享 FFN 会把所有 token 的表征"揉"向同一方向（representation collapse），Token Boost 改用每个 token 独立的变换参数，主动维持 token 异质性。Zenith 用 TSwiGLU（tokenwise 门控 FFN），Zenith++ 升级为 TSMoE（稀疏专家混合，不增加推理计算量的前提下扩展容量）。
 
 最终将 token 相似度从 0.5~0.68 压至 0.06~0.47，实现有效 scaling。详见 [[2026][Bytedance] Zenith](<[2026][Bytedance] Zenith Scaling up Ranking Models for Billion-scale Livestreaming Recommendation.md>)。
+
+### OneTrans（2025，工业界）
+
+将**序列建模**（用户行为历史）和**特征交叉**（user/item/context 属性）统一进同一个 Transformer stack，打破传统"先 encode 序列再做交叉"的两阶段流水线。
+
+**1. 统一 Tokenization**：将所有输入统一为 token 序列——S-tokens（行为序列）和 NS-tokens（非序列特征，如 user/item profile、上下文）。两类 token 拼接后一起送入 Transformer，NS-token 在 attention 中自然聚合全部行为历史。
+
+**2. 混合参数化（Mixed Parameterization）**：S-tokens 语义同质（都是行为），共享 Q/K/V 投影和 FFN；NS-tokens 语义异质（不同属性），每个 token 拥有独立投影矩阵和独立 FFN。这一设计与 Zenith 的"token 异质性"原则一致——不强迫异构特征共享参数空间，同时保持序列侧的计算效率。
+
+**3. Pyramid Stack**：逐层对 S-tokens 做 progressive pruning（如 1190→12 个），信息向 NS-tokens 汇聚，将 attention 复杂度从 $O(L^2 d)$ 降至 $O(LL'd)$。
+
+**4. 工程优化**：Cross-request KV caching 在多个候选之间复用 S 侧计算，将每请求序列计算量从 $O(L)$ 降至 $O(\Delta L)$；结合 FlashAttention-2 部署。
+
+线上 A/B 结果：Click/user +5%～+8%，GMV/user +3.7%～+5.7%，同时延迟下降 3%～4%。在离线 scaling 曲线上斜率优于 RankMixer，参数效率更高。
 
