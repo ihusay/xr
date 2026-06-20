@@ -26,10 +26,10 @@ $$\hat{y} = f_1(x_1) + f_2(x_2) + \underbrace{f_{12}(x_1, x_2)}_{\text{协同项
 
 | 处理维度 | 特征级 token | 语义压缩 token | 位置切片 token |
 |---|---|---|---|
-| **代表** | Wukong、Hiformer | Zenith | MixFormer |
-| **一个 token = ?** | 单个 embedding 向量 | 一组语义相近特征压成的高维向量 | 全部 NS 特征 concat 后等长切的一片 |
-| **构造操作** | lookup 直接成 token（multi-hot 先 sum pooling，dense 经 MLP+split） | 分组 concat → per-group MLP 投影；ID 特征单独成 token | 全部 concat → chunk 切 $N$ 片 → 独立 $W_j$ 升维 |
-| **分组依据** | 无（一特征一 token） | 人工语义分组（语义相近放一组） | 位置等分（机械切，无语义） |
+| **代表** | Wukong、Hiformer | Zenith | MixFormer、UniMixer |
+| **一个 token = ?** | 单个 embedding 向量 | 一组语义相近特征压成的高维向量 | concat 后等长切的一片 |
+| **构造操作** | lookup 直接成 token（multi-hot 先 sum pooling，dense 经 MLP+split） | 分组 concat → per-group MLP 投影；ID 特征单独成 token | 全部或 domain-ordered embedding concat → chunk 切片 → 独立 $W_j$ 升维 |
+| **分组依据** | 无（一特征一 token） | 人工语义分组（语义相近放一组） | 位置等分；UniMixer 先按 domain 组织 embedding，concat 后仍保留弱语义顺序 |
 | **token 数** | 与特征数同阶（Wukong $n$；Hiformer $L=\lvert C\rvert+n^D+t$） | $T=32$（从 $K=4552$ 压来） | $N=8\sim16$ 固定超参 |
 | **token 数 vs 特征数** | 同阶，随特征膨胀 | 语义解耦，分组决定（仍可能涨） | 完全固定，与特征数无关 |
 
@@ -37,6 +37,8 @@ $$\hat{y} = f_1(x_1) + f_2(x_2) + \underbrace{f_{12}(x_1, x_2)}_{\text{协同项
 
 - **语义压缩**认为 token 必须语义纯净——因为它是 self-attention 单元，混入杂特征会引入 attention 噪声 → 人工语义分组
 - **位置切片**认为 token 是 cross-attention 的 query 不是 self-attention 单元，纯净度无所谓，HeadMixing 能补语义模糊，几千特征人工分组是负担 → 位置等分即可
+
+UniMixer 处在两者之间：原文先按 User/Profile/Behavior/Query 等语义 domain 做 embedding，再立即 concat 成长向量并按位置切 block。domain 分组不是后续建模的隔离边界，但 concat 顺序让 block token 带有弱语义布局。详见 [[2026][UniMixer][Kuaishou]](<[2026][UniMixer][Kuaishou] UniMixer A Unified Architecture for Scaling Laws in Recommendation Systems.md>)。
 
 ---
 
@@ -100,3 +102,20 @@ $$\hat{y} = f_1(x_1) + f_2(x_2) + \underbrace{f_{12}(x_1, x_2)}_{\text{协同项
 
 线上 A/B 结果：Click/user +5%～+8%，GMV/user +3.7%～+5.7%，同时延迟下降 3%～4%。在离线 scaling 曲线上斜率优于 RankMixer，参数效率更高。
 
+### MixFormer（2026，ByteDance）
+
+面向工业推荐里 dense 特征交叉和长行为序列建模分离的问题。传统架构通常先单独 encode 用户行为序列，再把序列表征作为特征交给 dense ranking tower，两个模块竞争同一计算预算，且只在固定接口处传递信息，无法协同 scaling。
+
+MixFormer 的做法是在每个 block 内让非序列特征（NS-tokens）直接 attend 用户行为序列（S-tokens）：NS 特征先 concat 后按位置等长切成多个 head，经 Query Mixer 做无参数 HeadMixing，再作为 query 去 cross-attend 行为序列，最后通过 per-head SwiGLU 做 Output Fusion。这样 dense 特征交叉和序列建模不再是两个独立模块，而是在层内深度融合、梯度双向流动。
+
+关键设计是 Query Mixer 中的 HeadMixing：把 $N$ 个 head 的表示 reshape 成 $N \times N \times D/N$，转置前两维后 flatten，用无参数转置实现跨 head 信息交换，避免 self-attention 的 $QK^T$ 计算。线上 A/B 在抖音场景带来 Finish Rate +0.3897%、Comments +0.7035%。详见 [[2026][MixFormer][ByteDance]](<[2026][MixFormer][ByteDance] MixFormer Co-Scaling Up Dense and Sequence in Industrial Recommenders.md>)。
+
+### UniMixer（2026，Kuaishou）
+
+Heterogeneous Attention 虽然可学习，但在异构推荐特征上用 $QK^T$ 内积决定交互强度，训练早期容易被输入 token 数值主导，产生不稳定的 attention pattern；TokenMixer 虽然高效稳定，但 mixing 规则固定、不可学习，难以适配不同业务场景。
+
+UniMixer 的做法是把 TokenMixer 的固定置换矩阵参数化，拆成 block 内 local mixing $W_B^i$ 和 block 间 global mixing $W_G$，让原本规则化的 mixing pattern 变成可学习的 heterogeneous feature interaction。更一般地看，它把 attention-based、TokenMixer-based、FM-based 三类推荐 scaling block 统一为"Local Mixing Pattern + Global Mixing Pattern"。
+
+Feature Tokenization 上，UniMixer 先按语义 domain 生成 embedding，再 concat 成 $E=[e_1,\ldots,e_N]$，随后等长切 block 并用 token-specific linear layer 得到 $X \in \mathbb{R}^{T \times D}$。这个设计不是 Zenith 式语义纯 token，也不是完全无语义的随机切片，而是"domain-ordered concat 后的位置切片"。
+
+UniMixing-Lite 进一步用低秩 $A_GB_G$ 压缩 global mixing，并用 basis matrices 组合生成 local mixing，在快手广告留存任务上取得比 RankMixer 更高的参数/FLOPs scaling exponent。详见 [[2026][UniMixer][Kuaishou]](<[2026][UniMixer][Kuaishou] UniMixer A Unified Architecture for Scaling Laws in Recommendation Systems.md>)。

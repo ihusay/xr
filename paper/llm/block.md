@@ -12,6 +12,35 @@ Transformer 有两个形状互为转置的矩阵：
 
 ---
 
+## FFN 激活函数：ReLU → SwiGLU
+
+标准 Transformer FFN：`x → Linear → ReLU → Linear`。
+
+ReLU 在负值区梯度为零（dying ReLU），且无门控——所有维度无差别通过非线性，表达能力有限。
+
+**GLU（Gated Linear Unit）**引入乘法门控：
+
+$$\text{GLU}(x) = \sigma(xW_1) \otimes (xW_2)$$
+
+一条分支做 sigmoid 门控，另一条直接传值，逐元素相乘。网络可以学习"哪些维度值得通过"，输出是乘法交互而非纯加法叠加。
+
+**SwiGLU** 把 sigmoid 换成 Swish（即 SiLU，`x·σ(x)`）：
+
+$$\text{SwiGLU}(x) = \text{Swish}(xW_1) \otimes (xW_2)$$
+
+```
+ReLU FFN:   x → Linear → ReLU → Linear
+SwiGLU FFN: x → Linear₁ → Swish ─┐
+                                   ⊗ → Linear_down
+            x → Linear₂ ──────────┘
+```
+
+Swish 在负值区有小的非零梯度，曲线平滑，优化更稳定；门控机制带来乘法交互能力。Noam Shazeer 2020 年实验验证 SwiGLU 在 Transformer FFN 中一致优于 ReLU/GELU，PaLM、LLaMA、Qwen 均采用，成为现代大模型标配。
+
+注意：SwiGLU 有三个矩阵（$W_1, W_2, W_{down}$），为保持与两矩阵 ReLU FFN 相同的参数量，hidden_dim 需缩小为原始值的 $\frac{2}{3}$。
+
+---
+
 ## RMSNorm vs LayerNorm
 
 | 维度 | LayerNorm | RMSNorm |

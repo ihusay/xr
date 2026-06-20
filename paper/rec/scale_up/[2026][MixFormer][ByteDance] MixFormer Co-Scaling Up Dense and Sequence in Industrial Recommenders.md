@@ -101,6 +101,35 @@ $$z_i = \sum_t \text{softmax}\!\left(\frac{q_i^\top k_t^i}{\sqrt{D}}\right) v_t^
 
 每个 head 用独立的 $K/V$ 投影矩阵，不同特征从序列中抽取各自关注的行为信号。这是联合处理的核心——**dense 特征直接 condition 在序列上，梯度双向流通**。
 
+```python
+class MixFormerCrossAttention(nn.Module):
+    def __init__(self, num_heads, dim):
+        super().__init__()
+        self.N, self.D = num_heads, dim
+        self.norm = nn.RMSNorm(dim)
+        # 序列升维到 N*D，再切分给各头
+        self.seq_ffn = nn.Sequential(nn.Linear(dim, dim * num_heads), nn.SiLU())
+        # 每头独立 K/V 投影
+        self.W_k = nn.Linear(num_heads * dim, num_heads * dim, groups=num_heads)
+        self.W_v = nn.Linear(num_heads * dim, num_heads * dim, groups=num_heads)
+
+    def forward(self, queries, seq):
+        # queries: (B, N, D)  来自 Query Mixer
+        # seq:     (B, T, D)  原始行为序列，每个 block 读同一份
+        B, T, _ = seq.shape
+        N, D = self.N, self.D
+
+        h = self.seq_ffn(self.norm(seq))             # (B, T, N*D)
+        k = self.W_k(h).view(B, T, N, D)             # (B, T, N, D)
+        v = self.W_v(h).view(B, T, N, D)             # (B, T, N, D)
+
+        # q: (B,N,D), k/v: (B,T,N,D) → scores: (B,N,T)
+        scores = torch.einsum('bnd,btnd->bnt', queries, k) / D ** 0.5
+        attn   = scores.softmax(dim=-1)              # (B, N, T)
+        z      = torch.einsum('bnt,btnd->bnd', attn, v) + queries  # (B, N, D)
+        return z
+```
+
 #### Output Fusion（深度融合）
 
 每个 head 独立过 SwiGLU FFN，保持 head 间异质性，完成序列信号与 dense 特征的非线性融合：
@@ -146,30 +175,3 @@ $$o_i = \text{SwiGLUFFN}_i(\text{Norm}(z_i)) + z_i$$
 | Comments | +0.7035% |
 
 抖音极速版 Comments +1.91%，结果未收敛。
-
----
-
-## 附录：与 Zenith 的特征分组设计对比
-
-### 为什么不按语义分组
-
-Zenith 语义分组的目的是让每个 Prime Token 语义纯净，因为后续 RSA/TMHSA 做的是 token 间 self-attention，token 内混入不相关特征会引入 attention 噪声，分组是为了让 token 成为"有意义的查询单元"。
-
-MixFormer 的 NS-token 定位不同——它是 Cross Attention 的 query，去 attend 用户行为序列。Query Mixer 里的 HeadMixing 在进入 Cross Attention 之前已经做了跨 head 信息混合，语义模糊性在此被弥补。语义分组对 MixFormer 没有必要，且 Zenith 有 4552 个特征，人工维护分组本身是工程负担。消融实验显示 HeadMixing 效果充分，按位置等分足够。
-
-### 特征多了 token 数会不会爆炸
-
-不会。MixFormer 的 token 数 N 是固定超参，与特征数 M 无关：
-
-```
-特征数 M 增加 → e_ns 变长（D_ns 增大）→ 每个 head 的切片 d = D_ns/N 变大
-                                          W_j 输入维度变大，但 N 不变
-```
-
-| | Zenith | MixFormer |
-|---|---|---|
-| token 数 | T，由语义分组决定（如 32） | N，固定超参（如 8~16） |
-| 特征增加时 | token 数可能随之增加 | token 数不变，每个 head 切片更宽 |
-| Cross Attention 复杂度 | O(T × L) | O(N × L) |
-
-代价是特征越多每个 head 的 `Linear(d→D)` 需压缩更多信息，但 N 始终可控，serving 延迟不会因特征增加而爆炸。
